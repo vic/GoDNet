@@ -53,7 +53,7 @@ func main() {
 
 	stats := net.GetStats()
 	seconds := elapsed.Seconds()
-	
+
 	fmt.Fprintf(os.Stderr, "\nStats:\n")
 	fmt.Fprintf(os.Stderr, "Time: %v\n", elapsed)
 	fmt.Fprintf(os.Stderr, "Total Reductions: %d", stats.TotalReductions)
@@ -61,38 +61,38 @@ func main() {
 		fmt.Fprintf(os.Stderr, " (%.2f ops/sec)", float64(stats.TotalReductions)/seconds)
 	}
 	fmt.Fprintf(os.Stderr, "\n")
-	
+
 	fmt.Fprintf(os.Stderr, "\nBreakdown:\n")
 	fmt.Fprintf(os.Stderr, "  Fan Annihilation:        %6d", stats.FanAnnihilation)
 	if seconds > 0 {
 		fmt.Fprintf(os.Stderr, " (%.2f ops/sec)", float64(stats.FanAnnihilation)/seconds)
 	}
 	fmt.Fprintf(os.Stderr, "\n")
-	
+
 	fmt.Fprintf(os.Stderr, "  Replicator Annihilation: %6d", stats.RepAnnihilation)
 	if seconds > 0 {
 		fmt.Fprintf(os.Stderr, " (%.2f ops/sec)", float64(stats.RepAnnihilation)/seconds)
 	}
 	fmt.Fprintf(os.Stderr, "\n")
-	
+
 	fmt.Fprintf(os.Stderr, "  Replicator Commutation:  %6d", stats.RepCommutation)
 	if seconds > 0 {
 		fmt.Fprintf(os.Stderr, " (%.2f ops/sec)", float64(stats.RepCommutation)/seconds)
 	}
 	fmt.Fprintf(os.Stderr, "\n")
-	
+
 	fmt.Fprintf(os.Stderr, "  Fan-Rep Commutation:     %6d", stats.FanRepCommutation)
 	if seconds > 0 {
 		fmt.Fprintf(os.Stderr, " (%.2f ops/sec)", float64(stats.FanRepCommutation)/seconds)
 	}
 	fmt.Fprintf(os.Stderr, "\n")
-	
+
 	fmt.Fprintf(os.Stderr, "  Erasure:                 %6d", stats.Erasure)
 	if seconds > 0 {
 		fmt.Fprintf(os.Stderr, " (%.2f ops/sec)", float64(stats.Erasure)/seconds)
 	}
 	fmt.Fprintf(os.Stderr, "\n")
-	
+
 	if stats.RepDecay > 0 {
 		fmt.Fprintf(os.Stderr, "  Replicator Decay:        %6d", stats.RepDecay)
 		if seconds > 0 {
@@ -100,7 +100,7 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "\n")
 	}
-	
+
 	if stats.RepMerge > 0 {
 		fmt.Fprintf(os.Stderr, "  Replicator Merge:        %6d", stats.RepMerge)
 		if seconds > 0 {
@@ -108,7 +108,7 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "\n")
 	}
-	
+
 	if stats.AuxFanRep > 0 {
 		fmt.Fprintf(os.Stderr, "  Aux Fan-Rep:             %6d", stats.AuxFanRep)
 		if seconds > 0 {
