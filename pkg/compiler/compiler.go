@@ -39,8 +39,20 @@ func (c *Compiler) Compile() (string, error) {
 	}
 	goCode := gen.Generate(term)
 
-	// Write to temporary file
-	tmpFile, err := os.CreateTemp("", "godnet-*.go")
+	// Determine output name first (needed for temp file location)
+	outputName := c.OutputName
+	if outputName == "" {
+		// Default: strip .lam extension
+		outputName = strings.TrimSuffix(filepath.Base(c.SourceFile), filepath.Ext(c.SourceFile))
+	}
+
+	// Write to temporary file in same directory as output (required by go build)
+	outputDir := filepath.Dir(outputName)
+	if outputDir == "." || outputDir == "" {
+		outputDir, _ = os.Getwd()
+	}
+
+	tmpFile, err := os.CreateTemp(outputDir, "godnet-*.go")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -57,24 +69,75 @@ func (c *Compiler) Compile() (string, error) {
 	}
 	tmpFile.Close()
 
-	// Determine output name
-	outputName := c.OutputName
-	if outputName == "" {
-		// Default: strip .lam extension
-		outputName = strings.TrimSuffix(filepath.Base(c.SourceFile), filepath.Ext(c.SourceFile))
+	// Copy user-provided .go files to output directory (required by go build)
+	var copiedFiles []string
+	for _, flag := range c.GoFlags {
+		if strings.HasSuffix(flag, ".go") {
+			srcData, err := os.ReadFile(flag)
+			if err != nil {
+				return "", fmt.Errorf("failed to read %s: %w", flag, err)
+			}
+			dstPath := filepath.Join(outputDir, filepath.Base(flag))
+			if err := os.WriteFile(dstPath, srcData, 0644); err != nil {
+				return "", fmt.Errorf("failed to copy %s: %w", flag, err)
+			}
+			copiedFiles = append(copiedFiles, dstPath)
+			defer func(path string) {
+				if !c.KeepTemp {
+					os.Remove(path)
+				}
+			}(dstPath)
+		}
 	}
 
+	// Find go.mod directory to set module context
+	goModDir := findGoModDir(c.SourceFile)
+
 	// Build with go build
+	buildDir := outputDir
+	if goModDir != "" {
+		// If we found go.mod, build from module root for proper dependency resolution
+		buildDir = goModDir
+	}
+
 	args := []string{"build", "-o", outputName}
-	args = append(args, c.GoFlags...)
-	args = append(args, tmpPath)
+
+	// Add non-.go flags
+	for _, flag := range c.GoFlags {
+		if !strings.HasSuffix(flag, ".go") {
+			args = append(args, flag)
+		}
+	}
+
+	// Add all Go files (use full paths if building from different directory)
+	if buildDir != outputDir {
+		args = append(args, tmpPath)
+		args = append(args, copiedFiles...)
+	} else {
+		args = append(args, filepath.Base(tmpPath))
+		for _, copied := range copiedFiles {
+			args = append(args, filepath.Base(copied))
+		}
+	}
 
 	cmd := exec.Command("go", args...)
+	cmd.Dir = buildDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	// Debug: show what we're running
+	if c.KeepTemp {
+		fmt.Fprintf(os.Stderr, "Build dir: %s\n", buildDir)
+		fmt.Fprintf(os.Stderr, "Build cmd: go %s\n", strings.Join(args, " "))
+	}
+
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("go build failed: %w", err)
+	}
+
+	// Return absolute path to output
+	if !filepath.IsAbs(outputName) {
+		outputName = filepath.Join(outputDir, filepath.Base(outputName))
 	}
 
 	if c.KeepTemp {
@@ -82,4 +145,29 @@ func (c *Compiler) Compile() (string, error) {
 	}
 
 	return outputName, nil
+}
+
+// findGoModDir searches for go.mod starting from the given path
+func findGoModDir(startPath string) string {
+	dir := filepath.Dir(startPath)
+	if !filepath.IsAbs(dir) {
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
+	}
+
+	for {
+		goModPath := filepath.Join(dir, "go.mod")
+		if _, err := os.Stat(goModPath); err == nil {
+			return dir
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break // Reached root
+		}
+		dir = parent
+	}
+
+	return "" // Not found
 }

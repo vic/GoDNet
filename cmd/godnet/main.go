@@ -18,7 +18,7 @@ func main() {
 		runCompile()
 		return
 	}
-	
+
 	// Default: eval mode
 	runEval()
 }
@@ -28,21 +28,21 @@ func runCompile() {
 		fmt.Fprintf(os.Stderr, "Usage: godnet compile <source.lam> [go build flags...]\n")
 		os.Exit(1)
 	}
-	
+
 	sourceFile := os.Args[2]
 	goFlags := os.Args[3:]
-	
+
 	c := compiler.Compiler{
 		SourceFile: sourceFile,
 		GoFlags:    goFlags,
 	}
-	
+
 	outputName, err := c.Compile()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Compilation failed: %v\n", err)
 		os.Exit(1)
 	}
-	
+
 	fmt.Fprintf(os.Stderr, "Successfully compiled to: %s\n", outputName)
 }
 

@@ -26,11 +26,11 @@ type varInfo struct {
 // Generate produces Go source code from a lambda term.
 func (g *CodeGenerator) Generate(term lambda.Term) string {
 	g.vars = make(map[string]*varInfo)
-	
+
 	g.writeHeader()
 	g.writeBuildNetFunction(term)
 	g.writeMainFunction()
-	
+
 	return g.buf.String()
 }
 
@@ -54,10 +54,10 @@ func (g *CodeGenerator) writeBuildNetFunction(term lambda.Term) {
 	g.writeLine("func buildNet(net *deltanet.Network) (deltanet.Node, int, map[uint64]string) {")
 	g.writeLine("\tvarNames := make(map[uint64]string)")
 	g.writeLine("")
-	
+
 	// Translate the term
 	rootNode, rootPort := g.translateTerm(term, 0, 0)
-	
+
 	g.writeLine("")
 	g.writeLine("\treturn %s, %d, varNames", rootNode, rootPort)
 	g.writeLine("}")
@@ -116,22 +116,22 @@ func (g *CodeGenerator) genVar(v lambda.Var, level int, depth uint64) (string, i
 	if info, ok := g.vars[v.Name]; ok {
 		// Bound variable - expand replicator
 		g.writeComment("Variable: %s (bound)", v.Name)
-		
+
 		if strings.HasPrefix(info.nodeName, "rep_") {
 			// Already a replicator, expand it
 			oldRepName := info.nodeName
 			newRepName := g.nextNode("rep")
 			delta := level - (info.level + 1)
 			nextPort := info.uses + 1 // Next aux port index (1-based, since port 0 is principal)
-			
+
 			g.writeLine("\t// Expand replicator for variable '%s' (use #%d)", v.Name, info.uses+1)
 			g.writeLine("\t%s := net.NewReplicator(%d, append(%s.Deltas(), %d))",
 				newRepName, info.level, oldRepName, delta)
-			
+
 			// Move principal connection
 			g.writeLine("\tsourceNode, sourcePort := net.GetLink(%s, 0)", oldRepName)
 			g.writeLine("\tnet.LinkAt(%s, 0, sourceNode, sourcePort, %d)", newRepName, depth)
-			
+
 			// Move existing aux ports
 			g.writeLine("\tfor i := 0; i < len(%s.Deltas()); i++ {", oldRepName)
 			g.writeLine("\t\tdestNode, destPort := net.GetLink(%s, i+1)", oldRepName)
@@ -139,7 +139,7 @@ func (g *CodeGenerator) genVar(v lambda.Var, level int, depth uint64) (string, i
 			g.writeLine("\t\t\tnet.LinkAt(%s, i+1, destNode, destPort, %d)", newRepName, depth)
 			g.writeLine("\t\t}")
 			g.writeLine("\t}")
-			
+
 			info.nodeName = newRepName
 			info.uses++
 			return newRepName, nextPort
@@ -149,10 +149,10 @@ func (g *CodeGenerator) genVar(v lambda.Var, level int, depth uint64) (string, i
 			repName := g.nextNode("rep")
 			delta := level - (info.level + 1)
 			repLevel := info.level + 1
-			
+
 			g.writeLine("\t%s := net.NewReplicator(%d, []int{%d})", repName, repLevel, delta)
 			g.writeLine("\tnet.LinkAt(%s, 0, %s, %d, %d)", repName, info.nodeName, info.port, depth)
-			
+
 			info.nodeName = repName
 			info.uses = 1
 			return repName, 1
@@ -162,32 +162,32 @@ func (g *CodeGenerator) genVar(v lambda.Var, level int, depth uint64) (string, i
 		g.writeComment("Variable: %s (free)", v.Name)
 		varName := g.nextNode("var")
 		repName := g.nextNode("rep")
-		
+
 		g.writeLine("\t%s := net.NewVar()", varName)
 		g.writeLine("\tvarNames[%s.ID()] = \"%s\"", varName, v.Name)
 		g.writeLine("\t%s := net.NewReplicator(0, []int{%d})", repName, level-1)
 		g.writeLine("\tnet.LinkAt(%s, 0, %s, 0, %d)", repName, varName, depth)
-		
+
 		g.vars[v.Name] = &varInfo{
 			nodeName: repName,
 			port:     0,
 			level:    0,
 		}
-		
+
 		return repName, 1
 	}
 }
 
 func (g *CodeGenerator) genAbs(abs lambda.Abs, level int, depth uint64) (string, int) {
 	g.writeComment("Abstraction: λ%s. ...", abs.Arg)
-	
+
 	fanName := g.nextNode("fan")
 	eraName := g.nextNode("era")
-	
+
 	g.writeLine("\t%s := net.NewFan()", fanName)
 	g.writeLine("\t%s := net.NewEraser()", eraName)
 	g.writeLine("\tnet.LinkAt(%s, 0, %s, 2, %d)", eraName, fanName, depth)
-	
+
 	// Save old binding if shadowing
 	oldVar := g.vars[abs.Arg]
 	g.vars[abs.Arg] = &varInfo{
@@ -195,35 +195,35 @@ func (g *CodeGenerator) genAbs(abs lambda.Abs, level int, depth uint64) (string,
 		port:     2,
 		level:    level,
 	}
-	
+
 	// Generate body
 	bodyNode, bodyPort := g.translateTerm(abs.Body, level, depth)
 	g.writeLine("\tnet.LinkAt(%s, 1, %s, %d, %d)", fanName, bodyNode, bodyPort, depth)
-	
+
 	// Restore old binding
 	if oldVar != nil {
 		g.vars[abs.Arg] = oldVar
 	} else {
 		delete(g.vars, abs.Arg)
 	}
-	
+
 	return fanName, 0
 }
 
 func (g *CodeGenerator) genApp(app lambda.App, level int, depth uint64) (string, int) {
 	g.writeComment("Application")
-	
+
 	fanName := g.nextNode("fan")
 	g.writeLine("\t%s := net.NewFan()", fanName)
-	
+
 	// Generate function
 	funNode, funPort := g.translateTerm(app.Fun, level, depth)
 	g.writeLine("\tnet.LinkAt(%s, 0, %s, %d, %d)", fanName, funNode, funPort, depth)
-	
+
 	// Generate argument (level + 1)
 	argNode, argPort := g.translateTerm(app.Arg, level+1, depth+1)
 	g.writeLine("\tnet.LinkAt(%s, 2, %s, %d, %d)", fanName, argNode, argPort, depth+1)
-	
+
 	return fanName, 1
 }
 
