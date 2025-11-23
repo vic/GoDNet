@@ -1,10 +1,13 @@
 package deltanet
 
+import "sync"
+
 const MaxPriority = 64
 
 type Scheduler struct {
 	queues [MaxPriority]chan *Wire
 	signal chan struct{}
+	mu     sync.Mutex // Ensures strict leftmost-outermost order
 }
 
 func NewScheduler() *Scheduler {
@@ -34,16 +37,23 @@ func (s *Scheduler) Push(w *Wire, depth int) {
 
 func (s *Scheduler) Pop() *Wire {
 	for {
+		// Lock to ensure only one worker pops at a time,
+		// guaranteeing strict leftmost-outermost order
+		s.mu.Lock()
+		
 		// Scan for highest priority (lowest depth index)
 		for i := 0; i < MaxPriority; i++ {
 			select {
 			case w := <-s.queues[i]:
+				s.mu.Unlock()
 				return w
 			default:
 				continue
 			}
 		}
-		// No work found, wait for signal
+		
+		// No work found, unlock and wait for signal
+		s.mu.Unlock()
 		<-s.signal
 	}
 }

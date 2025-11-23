@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 )
 
 // NodeType identifies the type of agent.
@@ -40,6 +41,9 @@ type Node interface {
 	// Specific methods for Replicators
 	Level() int
 	Deltas() []int
+	SetDead() bool
+	IsDead() bool
+	Revive()
 }
 
 // Port represents a connection point on a node.
@@ -54,6 +58,7 @@ type Wire struct {
 	P0    atomic.Pointer[Port]
 	P1    atomic.Pointer[Port]
 	depth uint64
+	mu    sync.Mutex
 }
 
 // BaseNode contains common fields.
@@ -61,6 +66,7 @@ type BaseNode struct {
 	id    uint64
 	typ   NodeType
 	ports []*Port
+	dead  int32
 }
 
 func (n *BaseNode) Type() NodeType { return n.typ }
@@ -68,6 +74,18 @@ func (n *BaseNode) ID() uint64     { return n.id }
 func (n *BaseNode) Ports() []*Port { return n.ports }
 func (n *BaseNode) Level() int     { return 0 }
 func (n *BaseNode) Deltas() []int  { return nil }
+
+func (n *BaseNode) SetDead() bool {
+	return atomic.CompareAndSwapInt32(&n.dead, 0, 1)
+}
+
+func (n *BaseNode) IsDead() bool {
+	return atomic.LoadInt32(&n.dead) == 1
+}
+
+func (n *BaseNode) Revive() {
+	atomic.StoreInt32(&n.dead, 0)
+}
 
 // ReplicatorNode specific fields.
 type ReplicatorNode struct {
@@ -81,11 +99,12 @@ func (n *ReplicatorNode) Deltas() []int { return n.deltas }
 
 // Network manages the graph of nodes and interactions.
 type Network struct {
-	nextID    uint64
-	scheduler *Scheduler
-	wg        sync.WaitGroup
-	workers   int
-	startOnce sync.Once
+	nextID      uint64
+	scheduler   *Scheduler
+	wg          sync.WaitGroup
+	workers     int
+	startOnce   sync.Once
+	reductionMu sync.Mutex // Ensures only one reduction at a time for LMO order
 
 	// Stats
 	ops uint64 // Total reductions
@@ -378,21 +397,51 @@ func (n *Network) ReduceAll() {
 func (n *Network) worker() {
 	for {
 		wire := n.scheduler.Pop()
+		// Lock to ensure only one reduction at a time (strict LMO order)
+		n.reductionMu.Lock()
 		n.reducePair(wire)
+		n.reductionMu.Unlock()
 		n.wg.Done()
 	}
 }
 
 func (n *Network) reducePair(w *Wire) {
+	w.mu.Lock()
 	p0 := w.P0.Load()
 	p1 := w.P1.Load()
 
 	if p0 == nil || p1 == nil {
+		w.mu.Unlock()
 		return // Already handled?
+	}
+
+	// Verify consistency
+	if p0.Wire.Load() != w || p1.Wire.Load() != w {
+		w.mu.Unlock()
+		return
 	}
 
 	a := p0.Node
 	b := p1.Node
+
+	// Try to claim nodes
+	if !a.SetDead() {
+		w.mu.Unlock()
+		return
+	}
+	if !b.SetDead() {
+		a.Revive()
+		w.mu.Unlock()
+		return
+	}
+
+	// Disconnect to prevent double processing
+	w.P0.Store(nil)
+	w.P1.Store(nil)
+	p0.Wire.Store(nil)
+	p1.Wire.Store(nil)
+	w.mu.Unlock()
+
 	depth := w.depth
 
 	// Dispatch based on types
@@ -452,8 +501,12 @@ func (n *Network) reducePair(w *Wire) {
 }
 
 // Helper to connect two ports with a NEW wire
+// Internal wires created during commutation get incremented depth for proper LMO ordering
 func (n *Network) connect(p1, p2 *Port, depth uint64) {
-	wire := &Wire{depth: depth}
+	// Increment depth for internal structure created during commutation
+	// This ensures inner reductions have lower priority than outer ones (LMO)
+	newDepth := depth + 1
+	wire := &Wire{depth: newDepth}
 	wire.P0.Store(p1)
 	wire.P1.Store(p2)
 	p1.Wire.Store(wire)
@@ -462,93 +515,145 @@ func (n *Network) connect(p1, p2 *Port, depth uint64) {
 	// Check for new active pair
 	if p1.Index == 0 && p2.Index == 0 && isActive(p1.Node) && isActive(p2.Node) {
 		n.wg.Add(1)
-		n.scheduler.Push(wire, int(depth))
+		n.scheduler.Push(wire, int(newDepth))
 	}
 }
 
 // Helper to splice a new port into an existing wire.
 // pNew replaces pOld in the wire.
 func (n *Network) splice(pNew, pOld *Port) {
-	w := pOld.Wire.Load()
-	if w == nil {
+	for {
+		w := pOld.Wire.Load()
+		if w == nil {
+			return
+		}
+
+		// Lock wire to ensure atomic update
+		w.mu.Lock()
+
+		// Verify pOld is still pointing to w (race check)
+		if pOld.Wire.Load() != w {
+			w.mu.Unlock()
+			continue
+		}
+
+		// Verify pOld is still connected to w
+		if w.P0.Load() != pOld && w.P1.Load() != pOld {
+			// pOld is no longer connected to w
+			w.mu.Unlock()
+			continue
+		}
+
+		// Point pNew to w
+		pNew.Wire.Store(w)
+
+		// Update w to point to pNew instead of pOld
+		if w.P0.Load() == pOld {
+			w.P0.Store(pNew)
+		} else {
+			w.P1.Store(pNew)
+		}
+
+		// Clear the old port's Wire pointer
+		pOld.Wire.Store(nil)
+
+		// Check if this forms active pair
+		neighbor := w.Other(pNew)
+		if neighbor != nil && pNew.Index == 0 && neighbor.Index == 0 && isActive(pNew.Node) && isActive(neighbor.Node) {
+			n.wg.Add(1)
+			n.scheduler.Push(w, int(w.depth))
+		}
+
+		w.mu.Unlock()
 		return
-	}
-
-	// Point pNew to w
-	pNew.Wire.Store(w)
-
-	// Update w to point to pNew instead of pOld
-	if w.P0.Load() == pOld {
-		w.P0.Store(pNew)
-	} else {
-		w.P1.Store(pNew)
-	}
-
-	// Clear the old port's Wire pointer so it no longer appears connected.
-	// Leaving pOld.Wire non-nil can make canonicalization traverse through
-	// stale references and incorrectly mark nodes as reachable.
-	pOld.Wire.Store(nil)
-
-	// Check if this forms active pair
-	neighbor := w.Other(pNew)
-	if neighbor != nil && pNew.Index == 0 && neighbor.Index == 0 && isActive(pNew.Node) && isActive(neighbor.Node) {
-		n.wg.Add(1)
-		n.scheduler.Push(w, int(w.depth))
 	}
 }
 
 // Helper to fuse two existing wires (Annihilation)
 func (n *Network) fuse(p1, p2 *Port) {
-	// Retry loop for CAS
-	retries := 0
 	for {
-		retries++
-		if retries > 1000000 {
-			fmt.Printf("fuse stuck: p1=%d p2=%d\n", p1.Node.ID(), p2.Node.ID())
-			return
-		}
 		w1 := p1.Wire.Load()
 		w2 := p2.Wire.Load()
 
 		if w1 == nil || w2 == nil {
-			// Should not happen if nodes are connected
 			return
 		}
 
-		neighborP1 := w1.Other(p1)
-		neighborP2 := w2.Other(p2)
-
-		if neighborP1 == nil || neighborP2 == nil {
-			// Disconnected port?
-			return
+		// Lock ordering to prevent deadlock
+		first, second := w1, w2
+		if uintptr(unsafe.Pointer(first)) > uintptr(unsafe.Pointer(second)) {
+			first, second = second, first
 		}
 
-		// Verify neighborP2 is still connected to w2 (avoid race with concurrent fusion)
-		if w2.Other(neighborP2) != p2 {
+		first.mu.Lock()
+		if first != second {
+			second.mu.Lock()
+		}
+
+		// Validate that ports are still connected to these wires
+		if p1.Wire.Load() != w1 || p2.Wire.Load() != w2 {
+			if first != second {
+				second.mu.Unlock()
+			}
+			first.mu.Unlock()
 			runtime.Gosched()
 			continue
 		}
 
-		// Try to claim neighborP2
-		// fmt.Printf("CAS %p %p %p\n", neighborP2, w2, w1)
-		if neighborP2.Wire.CompareAndSwap(w2, w1) {
-			// Success! Now update w1 to point to neighborP2 instead of p1
-			// We need to replace p1 with neighborP2 in w1
-			if w1.P0.Load() == p1 {
-				w1.P0.Store(neighborP2)
-			} else {
-				w1.P1.Store(neighborP2)
-			}
+		// Identify neighbors
+		neighborP1 := w1.Other(p1)
+		neighborP2 := w2.Other(p2)
 
-			// Check if this formed a new active pair
+		// Case: w1 == w2 (Loop)
+		if w1 == w2 {
+			// p1 and p2 are connected to each other.
+			// Disconnect both.
+			p1.Wire.Store(nil)
+			p2.Wire.Store(nil)
+			w1.P0.Store(nil)
+			w1.P1.Store(nil)
+			first.mu.Unlock()
+			return
+		}
+
+		// Perform fusion: Keep w1, discard w2.
+		// Connect neighborP2 to w1.
+
+		// Update neighborP2 to point to w1
+		// Note: neighborP2 might be locked by another fuse if it's being fused.
+		// But we hold w2 lock, and neighborP2.Wire == w2.
+		// So another fuse would need w2 lock to change neighborP2.Wire.
+		// We hold w2 lock, so we are safe.
+		if neighborP2 != nil {
+			neighborP2.Wire.Store(w1)
+		}
+
+		// Update w1 to point to neighborP2 (replacing p1)
+		if w1.P0.Load() == p1 {
+			w1.P0.Store(neighborP2)
+		} else {
+			w1.P1.Store(neighborP2)
+		}
+
+		// Disconnect p1, p2, and clear w2
+		p1.Wire.Store(nil)
+		p2.Wire.Store(nil)
+		w2.P0.Store(nil)
+		w2.P1.Store(nil)
+
+		// Check for new active pair
+		if neighborP1 != nil && neighborP2 != nil {
 			if neighborP1.Index == 0 && neighborP2.Index == 0 && isActive(neighborP1.Node) && isActive(neighborP2.Node) {
 				n.wg.Add(1)
 				n.scheduler.Push(w1, int(w1.depth))
 			}
-			return
 		}
-		// CAS failed, neighborP2 moved. Retry.
-		runtime.Gosched()
+
+		if first != second {
+			second.mu.Unlock()
+		}
+		first.mu.Unlock()
+		return
 	}
 }
 
@@ -729,7 +834,10 @@ func (n *Network) rotateFan(fan *BaseNode) {
 }
 
 // ApplyCanonicalRules applies decay and merge rules to all nodes.
-func (n *Network) ApplyCanonicalRules() {
+func (n *Network) ApplyCanonicalRules() bool {
+	startDecay := atomic.LoadUint64(&n.statRepDecay)
+	startMerge := atomic.LoadUint64(&n.statRepMerge)
+
 	n.nodesMu.Lock()
 	nodes := make([]Node, 0, len(n.nodes))
 	for _, node := range n.nodes {
@@ -757,9 +865,18 @@ func (n *Network) ApplyCanonicalRules() {
 			n.reduceRepMerge(node)
 		}
 	}
+
+	n.wg.Wait()
+
+	endDecay := atomic.LoadUint64(&n.statRepDecay)
+	endMerge := atomic.LoadUint64(&n.statRepMerge)
+	return endDecay > startDecay || endMerge > startMerge
 }
 
 func (n *Network) reduceRepMerge(rep Node) {
+	if rep.IsDead() {
+		return
+	}
 	// Check if any aux port is connected to another Replicator's Principal
 	for i := 1; i < len(rep.Ports()); i++ {
 		p := rep.Ports()[i]
@@ -767,8 +884,17 @@ func (n *Network) reduceRepMerge(rep Node) {
 		if w == nil {
 			continue
 		}
+		
+		// Lock wire to inspect neighbor safely
+		w.mu.Lock()
+		if p.Wire.Load() != w {
+			w.mu.Unlock()
+			continue
+		}
+		
 		other := w.Other(p)
 		if other == nil {
+			w.mu.Unlock()
 			continue
 		}
 
@@ -780,13 +906,24 @@ func (n *Network) reduceRepMerge(rep Node) {
 			// Level(Other) == Level(Rep) + Delta(Rep)[i-1]
 			delta := rep.Deltas()[i-1]
 			if otherRep.Level() == rep.Level()+delta {
+				w.mu.Unlock() // Unlock before merge (merge will lock wires)
+
+				// Try to claim nodes
+				if !rep.SetDead() {
+					return
+				}
+				if !otherRep.SetDead() {
+					rep.Revive()
+					return
+				}
+
 				n.mergeReplicators(rep, otherRep, i-1)
 				return // Only one merge per pass to avoid complexity
 			}
 		}
+		w.mu.Unlock()
 	}
 }
-
 func (n *Network) mergeReplicators(repA, repB Node, auxIndexA int) {
 	// repA Aux[auxIndexA] <-> repB Principal
 
@@ -812,7 +949,6 @@ func (n *Network) mergeReplicators(repA, repB Node, auxIndexA int) {
 	// repA Principal neighbor <-> newRep Principal
 	pA0 := repA.Ports()[0]
 	if w := pA0.Wire.Load(); w != nil {
-		// neighbor := w.Other(pA0) // Not needed for splice
 		n.splice(newRep.Ports()[0], pA0)
 	}
 
@@ -845,6 +981,11 @@ func (n *Network) mergeReplicators(repA, repB Node, auxIndexA int) {
 }
 
 func (n *Network) reduceRepDecay(rep Node) {
+	// Try to claim node
+	if !rep.SetDead() {
+		return
+	}
+
 	// Rep(0) <-> A(i)
 	// Rep(1) <-> B(j)
 	// Link A(i) <-> B(j)
@@ -852,41 +993,75 @@ func (n *Network) reduceRepDecay(rep Node) {
 	p0 := rep.Ports()[0]
 	p1 := rep.Ports()[1]
 
-	w0 := p0.Wire.Load()
-	w1 := p1.Wire.Load()
+	for {
+		w0 := p0.Wire.Load()
+		w1 := p1.Wire.Load()
 
-	if w0 == nil || w1 == nil {
-		return
-	}
+		if w0 == nil || w1 == nil {
+			rep.Revive() // Failed to lock/find wires
+			return
+		}
 
-	neighbor0 := w0.Other(p0)
-	neighbor1 := w1.Other(p1)
+		// Lock ordering
+		first, second := w0, w1
+		if uintptr(unsafe.Pointer(first)) > uintptr(unsafe.Pointer(second)) {
+			first, second = second, first
+		}
 
-	if neighbor0 == nil || neighbor1 == nil {
-		return
-	}
+		first.mu.Lock()
+		if first != second {
+			second.mu.Lock()
+		}
 
-	// Create new wire between neighbor0 and neighbor1
-	// We can reuse w0
+		// Verify connections
+		if p0.Wire.Load() != w0 || p1.Wire.Load() != w1 {
+			if first != second {
+				second.mu.Unlock()
+			}
+			first.mu.Unlock()
+			runtime.Gosched()
+			continue
+		}
 
-	// Update neighbor1 to point to w0
-	if neighbor1.Wire.CompareAndSwap(w1, w0) {
-		// Update w0 to point to neighbor1 instead of p0
+		neighbor0 := w0.Other(p0)
+		neighbor1 := w1.Other(p1)
+
+		// Reuse w0 to connect neighbor0 and neighbor1
+		// Update neighbor1 to point to w0
+		if neighbor1 != nil {
+			neighbor1.Wire.Store(w0)
+		}
+
+		// Update w0 to point to neighbor1 (replacing p0)
 		if w0.P0.Load() == p0 {
 			w0.P0.Store(neighbor1)
 		} else {
 			w0.P1.Store(neighbor1)
 		}
 
+		// Disconnect p0, p1, clear w1
+		p0.Wire.Store(nil)
+		p1.Wire.Store(nil)
+		w1.P0.Store(nil)
+		w1.P1.Store(nil)
+
 		// Check active pair
-		if neighbor0.Index == 0 && neighbor1.Index == 0 && isActive(neighbor0.Node) && isActive(neighbor1.Node) {
-			n.wg.Add(1)
-			n.scheduler.Push(w0, int(w0.depth))
+		if neighbor0 != nil && neighbor1 != nil {
+			if neighbor0.Index == 0 && neighbor1.Index == 0 && isActive(neighbor0.Node) && isActive(neighbor1.Node) {
+				n.wg.Add(1)
+				n.scheduler.Push(w0, int(w0.depth))
+			}
 		}
 
 		n.removeNode(rep)
 		atomic.AddUint64(&n.statRepDecay, 1)
 		n.recordTrace(RuleRepDecay, rep, nil)
+
+		if first != second {
+			second.mu.Unlock()
+		}
+		first.mu.Unlock()
+		return
 	}
 }
 
@@ -900,10 +1075,10 @@ func (n *Network) ReduceToNormalForm() {
 	for {
 		prevOps := atomic.LoadUint64(&n.ops)
 		n.ReduceAll()
-		n.ApplyCanonicalRules()
+		changed := n.ApplyCanonicalRules()
 
 		currOps := atomic.LoadUint64(&n.ops)
-		if currOps == prevOps {
+		if currOps == prevOps && !changed {
 			// No progress
 			break
 		}
@@ -914,5 +1089,13 @@ func (n *Network) ReduceToNormalForm() {
 	n.ReduceAll()
 
 	// Final Canonicalization (Decay/Merge)
-	n.ApplyCanonicalRules()
+	for n.ApplyCanonicalRules() {
+	}
+}
+
+func (n *Network) SetWorkers(w int) {
+	if w < 1 {
+		w = 1
+	}
+	n.workers = w
 }
