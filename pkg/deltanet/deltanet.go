@@ -165,6 +165,12 @@ func (n *Network) GetStats() Stats {
 	}
 }
 
+func (n *Network) NodeCount() int {
+	n.nodesMu.Lock()
+	defer n.nodesMu.Unlock()
+	return len(n.nodes)
+}
+
 func (n *Network) nextNodeID() uint64 {
 	return atomic.AddUint64(&n.nextID, 1)
 }
