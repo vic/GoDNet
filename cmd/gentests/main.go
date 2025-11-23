@@ -98,7 +98,7 @@ func main() {
 		{"100_mixed_1", "(x: x) ((y: y) a)", "a"},
 	}
 
-	baseDir := "cmd/gentests/tests"
+	baseDir := "cmd/gentests/generated"
 	os.MkdirAll(baseDir, 0755)
 
 	for _, tc := range tests {
