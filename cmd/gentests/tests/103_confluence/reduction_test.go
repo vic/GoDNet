@@ -20,10 +20,10 @@ var output string
 // "Since all normal Delta-nets are canonical, the Delta-Nets systems are all Church-Rosser confluent."
 //
 // This test validates that:
-// 1. All reduction paths lead to the same canonical form
-// 2. The canonical form is independent of reduction order
-// 3. The two-phase reduction strategy (Phase 1: LMO + Canonicalization, Phase 2: Aux Fan Replication)
-//    produces a canonical result
+//  1. All reduction paths lead to the same canonical form
+//  2. The canonical form is independent of reduction order
+//  3. The two-phase reduction strategy (Phase 1: LMO + Canonicalization, Phase 2: Aux Fan Replication)
+//     produces a canonical result
 func Test_103_confluence(t *testing.T) {
 	// Parse the input term
 	term, err := lambda.Parse(input)

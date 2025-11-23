@@ -40,7 +40,7 @@ func (s *Scheduler) Pop() *Wire {
 		// Lock to ensure only one worker pops at a time,
 		// guaranteeing strict leftmost-outermost order
 		s.mu.Lock()
-		
+
 		// Scan for highest priority (lowest depth index)
 		for i := 0; i < MaxPriority; i++ {
 			select {
@@ -51,7 +51,7 @@ func (s *Scheduler) Pop() *Wire {
 				continue
 			}
 		}
-		
+
 		// No work found, unlock and wait for signal
 		s.mu.Unlock()
 		<-s.signal

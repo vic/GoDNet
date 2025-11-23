@@ -884,14 +884,14 @@ func (n *Network) reduceRepMerge(rep Node) {
 		if w == nil {
 			continue
 		}
-		
+
 		// Lock wire to inspect neighbor safely
 		w.mu.Lock()
 		if p.Wire.Load() != w {
 			w.mu.Unlock()
 			continue
 		}
-		
+
 		other := w.Other(p)
 		if other == nil {
 			w.mu.Unlock()
