@@ -104,31 +104,31 @@ func (p *Parser) parseTerm() (Term, error) {
 	if p.current.Type == TokenLet {
 		return p.parseLet()
 	}
-	
+
 	// Try to parse an abstraction or application
 	// Since application is left-associative and abstraction extends to the right,
 	// we need to be careful.
 	// Nix syntax: x: Body
 	// App: M N
-	
+
 	// We parse a list of "atoms" and combine them as application.
 	// If we see an identifier followed by colon, it's an abstraction.
 	// But we need lookahead or backtracking.
 	// Actually, `x: ...` starts with ident then colon.
 	// `x y` starts with ident then ident.
-	
+
 	// Let's parse "Atom" first.
 	// Atom ::= Ident | ( Term )
-	
+
 	// If current is Ident:
 	// Check next token. If Colon, it's Abs.
 	// Else, it's an Atom (Var), and we continue parsing more Atoms for App.
-	
+
 	if p.current.Type == TokenIdent {
 		// Lookahead
 		savePos := p.pos
 		saveTok := p.current
-		
+
 		// Peek next
 		p.next()
 		if p.current.Type == TokenColon {
@@ -141,12 +141,12 @@ func (p *Parser) parseTerm() (Term, error) {
 			}
 			return Abs{Arg: arg, Body: body}, nil
 		}
-		
+
 		// Not an abstraction, backtrack
 		p.pos = savePos
 		p.current = saveTok
 	}
-	
+
 	return p.parseApp()
 }
 
@@ -155,7 +155,7 @@ func (p *Parser) parseApp() (Term, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	for {
 		if p.current.Type == TokenEOF || p.current.Type == TokenRParen || p.current.Type == TokenSemicolon || p.current.Type == TokenIn {
 			break
@@ -165,7 +165,7 @@ func (p *Parser) parseApp() (Term, error) {
 		// Usually lambda extends as far right as possible.
 		// So `x y: z` parses as `x (y: z)`.
 		// If we see Ident Colon, we should parse it as Abs and append to App.
-		
+
 		if p.current.Type == TokenIdent {
 			// Check for colon
 			savePos := p.pos
@@ -190,7 +190,7 @@ func (p *Parser) parseApp() (Term, error) {
 			p.pos = savePos
 			p.current = saveTok
 		}
-		
+
 		right, err := p.parseAtom()
 		if err != nil {
 			// If we can't parse an atom, maybe we are done
@@ -198,7 +198,7 @@ func (p *Parser) parseApp() (Term, error) {
 		}
 		left = App{Fun: left, Arg: right}
 	}
-	
+
 	return left, nil
 }
 
@@ -226,33 +226,33 @@ func (p *Parser) parseAtom() (Term, error) {
 
 func (p *Parser) parseLet() (Term, error) {
 	p.next() // consume 'let'
-	
+
 	// Parse bindings: x = M; y = N; ...
 	type binding struct {
 		name string
 		val  Term
 	}
 	var bindings []binding
-	
+
 	for {
 		if p.current.Type != TokenIdent {
 			return nil, fmt.Errorf("expected identifier in let binding")
 		}
 		name := p.current.Literal
 		p.next()
-		
+
 		if p.current.Type != TokenEqual {
 			return nil, fmt.Errorf("expected '='")
 		}
 		p.next()
-		
+
 		val, err := p.parseTerm()
 		if err != nil {
 			return nil, err
 		}
-		
+
 		bindings = append(bindings, binding{name, val})
-		
+
 		if p.current.Type == TokenSemicolon {
 			p.next()
 			// Check if next is 'in' or another ident
@@ -268,12 +268,12 @@ func (p *Parser) parseLet() (Term, error) {
 			return nil, fmt.Errorf("expected ';' or 'in'")
 		}
 	}
-	
+
 	body, err := p.parseTerm()
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Desugar: let x=M; y=N in B -> (\x. (\y. B) N) M
 	// We iterate backwards
 	term := body
@@ -284,7 +284,7 @@ func (p *Parser) parseLet() (Term, error) {
 			Arg: b.val,
 		}
 	}
-	
+
 	return term, nil
 }
 

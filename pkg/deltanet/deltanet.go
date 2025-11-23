@@ -147,6 +147,9 @@ func (n *Network) Start() {
 // 	n.phase = p
 // }
 
+func (n *Network) Phase() int {
+	return n.phase
+}
 
 func (n *Network) GetStats() Stats {
 	return Stats{
@@ -491,7 +494,13 @@ func (n *Network) splice(pNew, pOld *Port) {
 // Helper to fuse two existing wires (Annihilation)
 func (n *Network) fuse(p1, p2 *Port) {
 	// Retry loop for CAS
+	retries := 0
 	for {
+		retries++
+		if retries > 1000000 {
+			fmt.Printf("fuse stuck: p1=%d p2=%d\n", p1.Node.ID(), p2.Node.ID())
+			return
+		}
 		w1 := p1.Wire.Load()
 		w2 := p2.Wire.Load()
 
@@ -508,9 +517,11 @@ func (n *Network) fuse(p1, p2 *Port) {
 			return
 		}
 
-		// We want to connect neighborP1 and neighborP2.
-		// We can reuse w1.
-		// We need to update neighborP2 to point to w1.
+		// Verify neighborP2 is still connected to w2 (avoid race with concurrent fusion)
+		if w2.Other(neighborP2) != p2 {
+			runtime.Gosched()
+			continue
+		}
 
 		// Try to claim neighborP2
 		// fmt.Printf("CAS %p %p %p\n", neighborP2, w2, w1)
@@ -871,4 +882,31 @@ func (n *Network) reduceRepDecay(rep Node) {
 		atomic.AddUint64(&n.statRepDecay, 1)
 		n.recordTrace(RuleRepDecay, rep, nil)
 	}
+}
+
+// ReduceToNormalForm implements the full reduction strategy described in the paper:
+// 1. Phase 1 (LMO interactions + Canonical Rules) until convergence.
+// 2. Phase 2 (Aux Fan Replication).
+// 3. Final Canonicalization (Erasure/Decay).
+func (n *Network) ReduceToNormalForm() {
+	// Phase 1
+	n.SetPhase(1)
+	for {
+		prevOps := atomic.LoadUint64(&n.ops)
+		n.ReduceAll()
+		n.ApplyCanonicalRules()
+
+		currOps := atomic.LoadUint64(&n.ops)
+		if currOps == prevOps {
+			// No progress
+			break
+		}
+	}
+
+	// Phase 2
+	n.SetPhase(2)
+	n.ReduceAll()
+
+	// Final Canonicalization (Decay/Merge)
+	n.ApplyCanonicalRules()
 }

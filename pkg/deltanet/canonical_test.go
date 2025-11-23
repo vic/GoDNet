@@ -136,10 +136,14 @@ func TestPhase2AuxFanReplication(t *testing.T) {
 	n.Link(fan, 0, rep, 0)
 
 	// Connect other ports to vars to keep them alive
-	v1 := n.NewVar(); n.Link(fan, 1, v1, 0)
-	v2 := n.NewVar(); n.Link(fan, 2, v2, 0)
-	v3 := n.NewVar(); n.Link(rep, 1, v3, 0)
-	v4 := n.NewVar(); n.Link(rep, 2, v4, 0)
+	v1 := n.NewVar()
+	n.Link(fan, 1, v1, 0)
+	v2 := n.NewVar()
+	n.Link(fan, 2, v2, 0)
+	v3 := n.NewVar()
+	n.Link(rep, 1, v3, 0)
+	v4 := n.NewVar()
+	n.Link(rep, 2, v4, 0)
 
 	// Force Phase 2
 	n.SetPhase(2)

@@ -67,6 +67,7 @@ func CheckLambdaReduction(t *testing.T, testName string, inputStr string, output
 
 	// Convert input to Net
 	net := deltanet.NewNetwork()
+	// net.EnableTrace(1000) // Debug
 	root, port := lambda.ToDeltaNet(term, net)
 
 	// Connect to output interface
@@ -75,7 +76,8 @@ func CheckLambdaReduction(t *testing.T, testName string, inputStr string, output
 
 	// Reduce
 	start := time.Now()
-	net.ReduceAll()
+	net.ReduceToNormalForm()
+
 	elapsed := time.Since(start)
 
 	// Optionally canonicalize/prune unreachable nodes when the expected

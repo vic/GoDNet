@@ -407,7 +407,7 @@ func TestReplicatorDeltaShift(t *testing.T) {
 	// R1 replicates R2.
 	// R2 copy level = R2.Level + R1.Delta = 20 + 5 = 25.
 	// R2 copy connects to 'in' (R1's neighbor).
-	
+
 	// R2 replicates R1.
 	// R1 copy level = R1.Level = 10.
 	// R1 copy connects to 'out' (R2's neighbor).
@@ -440,26 +440,26 @@ func TestReplicatorDeltaShift(t *testing.T) {
 // TestReplicatorMultiDelta verifies that Replicator commutation handles multiple deltas correctly.
 func TestReplicatorMultiDelta(t *testing.T) {
 	net := NewNetwork()
-	
+
 	// R1: Level 10, Deltas [5, 10]
 	r1 := net.NewReplicator(10, []int{5, 10})
 	// R2: Level 20, Deltas [0]
 	r2 := net.NewReplicator(20, []int{0})
-	
+
 	net.Link(r1, 0, r2, 0)
-	
+
 	// R1 aux
 	in1 := net.NewVar()
 	in2 := net.NewVar()
 	net.Link(r1, 1, in1, 0)
 	net.Link(r1, 2, in2, 0)
-	
+
 	// R2 aux
 	out := net.NewVar()
 	net.Link(r2, 1, out, 0)
-	
+
 	net.ReduceAll()
-	
+
 	// Check in1 -> R2 copy with level 25
 	l1, _ := net.GetLink(in1, 0)
 	if l1 == nil || l1.Type() != NodeTypeReplicator {
@@ -467,7 +467,7 @@ func TestReplicatorMultiDelta(t *testing.T) {
 	} else if l1.Level() != 25 {
 		t.Errorf("in1 Replicator level: expected 25, got %d", l1.Level())
 	}
-	
+
 	// Check in2 -> R2 copy with level 30
 	l2, _ := net.GetLink(in2, 0)
 	if l2 == nil || l2.Type() != NodeTypeReplicator {
@@ -480,33 +480,33 @@ func TestReplicatorMultiDelta(t *testing.T) {
 // TestEraserPropagation verifies that an Eraser recursively destroys a structure.
 func TestEraserPropagation(t *testing.T) {
 	net := NewNetwork()
-	
+
 	// E >< F1
 	//      | \
 	//      F2 F3
-	
+
 	e := net.NewEraser()
 	f1 := net.NewFan()
 	f2 := net.NewFan()
 	f3 := net.NewFan()
-	
+
 	net.Link(e, 0, f1, 0)
 	net.Link(f1, 1, f2, 0)
 	net.Link(f1, 2, f3, 0)
-	
+
 	// Vars at the leaves
 	v1 := net.NewVar()
 	v2 := net.NewVar()
 	v3 := net.NewVar()
 	v4 := net.NewVar()
-	
+
 	net.Link(f2, 1, v1, 0)
 	net.Link(f2, 2, v2, 0)
 	net.Link(f3, 1, v3, 0)
 	net.Link(f3, 2, v4, 0)
-	
+
 	net.ReduceAll()
-	
+
 	// All vars should be connected to Erasers
 	verifyEraserConnection(t, net, v1)
 	verifyEraserConnection(t, net, v2)
