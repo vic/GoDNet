@@ -17,7 +17,9 @@ const (
 	NodeTypeReplicator
 	NodeTypeVar // Wire/Interface
 	NodeTypeData
-	NodeTypeNative
+	NodeTypePure
+	NodeTypeEffect
+	NodeTypeHandler
 )
 
 func (t NodeType) String() string {
@@ -32,8 +34,12 @@ func (t NodeType) String() string {
 		return "Var"
 	case NodeTypeData:
 		return "Data"
-	case NodeTypeNative:
-		return "Native"
+	case NodeTypePure:
+		return "Pure"
+	case NodeTypeEffect:
+		return "Effect"
+	case NodeTypeHandler:
+		return "Handler"
 	default:
 		return "Unknown"
 	}
@@ -54,6 +60,12 @@ type Node interface {
 	GetValue() interface{}
 	// For Native nodes
 	GetName() string
+	// For IO nodes (algebraic effects)
+	GetEffect() *Effect
+	GetEffectRow() EffectRow
+	GetContinuation() *Continuation
+	// For Handler nodes
+	GetHandlerScope() *HandlerScope
 }
 
 // Port represents a connection point on a node.
@@ -79,13 +91,17 @@ type BaseNode struct {
 	dead  int32
 }
 
-func (n *BaseNode) Type() NodeType        { return n.typ }
-func (n *BaseNode) ID() uint64            { return n.id }
-func (n *BaseNode) Ports() []*Port        { return n.ports }
-func (n *BaseNode) Level() int            { return 0 }
-func (n *BaseNode) Deltas() []int         { return nil }
-func (n *BaseNode) GetValue() interface{} { return nil }
-func (n *BaseNode) GetName() string       { return "" }
+func (n *BaseNode) Type() NodeType                 { return n.typ }
+func (n *BaseNode) ID() uint64                     { return n.id }
+func (n *BaseNode) Ports() []*Port                 { return n.ports }
+func (n *BaseNode) Level() int                     { return 0 }
+func (n *BaseNode) Deltas() []int                  { return nil }
+func (n *BaseNode) GetValue() interface{}          { return nil }
+func (n *BaseNode) GetName() string                { return "" }
+func (n *BaseNode) GetEffect() *Effect             { return nil }
+func (n *BaseNode) GetEffectRow() EffectRow        { return nil }
+func (n *BaseNode) GetContinuation() *Continuation { return nil }
+func (n *BaseNode) GetHandlerScope() *HandlerScope { return nil }
 
 func (n *BaseNode) SetDead() bool {
 	return atomic.CompareAndSwapInt32(&n.dead, 0, 1)
@@ -127,6 +143,29 @@ func (n *NativeNode) GetName() string { return n.name }
 
 // NativeFunc is a pure function that takes data and returns data or error.
 type NativeFunc func(interface{}) (interface{}, error)
+
+// IONode represents an algebraic effect to be performed.
+// It's a description of an effect, not the execution.
+// Carries effect row information and continuation capture point.
+type IONode struct {
+	BaseNode
+	effect       *Effect
+	effectRow    EffectRow
+	continuation *Continuation
+}
+
+func (n *IONode) GetEffect() *Effect             { return n.effect }
+func (n *IONode) GetEffectRow() EffectRow        { return n.effectRow }
+func (n *IONode) GetContinuation() *Continuation { return n.continuation }
+
+// HandlerNode represents a scope that handles algebraic effects.
+// Applies handlers innermost-first during reduction.
+type HandlerNode struct {
+	BaseNode
+	scope *HandlerScope
+}
+
+func (n *HandlerNode) GetHandlerScope() *HandlerScope { return n.scope }
 
 // Network manages the graph of nodes and interactions.
 type Network struct {
@@ -338,7 +377,7 @@ func (n *Network) NewNative(name string) Node {
 	node := &NativeNode{
 		BaseNode: BaseNode{
 			id:    id,
-			typ:   NodeTypeNative,
+			typ:   NodeTypePure,
 			ports: make([]*Port, 1), // 0: Connection (for application)
 		},
 		name: name,
@@ -364,6 +403,84 @@ func (n *Network) GetNative(name string) (NativeFunc, bool) {
 	defer n.nativesMu.RUnlock()
 	fn, ok := n.natives[name]
 	return fn, ok
+}
+
+// NewIO creates an IO node representing an algebraic effect.
+// The effect is a pure description - no side effects occur during reduction.
+func (n *Network) NewIO(effect *Effect, effectRow EffectRow) Node {
+	id := n.nextNodeID()
+	node := &IONode{
+		BaseNode: BaseNode{
+			id:    id,
+			typ:   NodeTypeEffect,
+			ports: make([]*Port, 1), // 0: Connection
+		},
+		effect:       effect,
+		effectRow:    effectRow,
+		continuation: nil, // Set during reduction when effect is performed
+	}
+	node.ports[0] = &Port{Node: node, Index: 0}
+	n.nodesMu.Lock()
+	if n.nodes == nil {
+		n.nodes = make(map[uint64]Node)
+	}
+	n.nodes[node.id] = node
+	n.nodesMu.Unlock()
+	return node
+}
+
+// NewHandler creates a Handler node that provides interpretations for effects.
+// Handlers are applied innermost-first during reduction.
+func (n *Network) NewHandler(scope *HandlerScope) Node {
+	id := n.nextNodeID()
+	node := &HandlerNode{
+		BaseNode: BaseNode{
+			id:    id,
+			typ:   NodeTypeHandler,
+			ports: make([]*Port, 2), // 0: Computation, 1: Result
+		},
+		scope: scope,
+	}
+	for i := range node.ports {
+		node.ports[i] = &Port{Node: node, Index: i}
+	}
+	n.nodesMu.Lock()
+	if n.nodes == nil {
+		n.nodes = make(map[uint64]Node)
+	}
+	n.nodes[node.id] = node
+	n.nodesMu.Unlock()
+	return node
+}
+
+// PerformEffect creates an IO node and captures the continuation.
+// This is called during reduction when an effect needs to be performed.
+func (n *Network) PerformEffect(effect *Effect, effectRow EffectRow, captureState interface{}) Node {
+	// Create continuation that will resume from this point
+	continuation := &Continuation{
+		capturedState: captureState,
+		// Resume function will be set by the handler
+	}
+
+	id := n.nextNodeID()
+	node := &IONode{
+		BaseNode: BaseNode{
+			id:    id,
+			typ:   NodeTypeEffect,
+			ports: make([]*Port, 1),
+		},
+		effect:       effect,
+		effectRow:    effectRow,
+		continuation: continuation,
+	}
+	node.ports[0] = &Port{Node: node, Index: 0}
+	n.nodesMu.Lock()
+	if n.nodes == nil {
+		n.nodes = make(map[uint64]Node)
+	}
+	n.nodes[node.id] = node
+	n.nodesMu.Unlock()
+	return node
 }
 
 // Canonicalize prunes all nodes not reachable from the given root (node, port).
@@ -645,8 +762,8 @@ func (n *Network) reducePair(w *Wire) {
 				n.commuteFanReplicator(b, a, depth)
 			}
 		}
-	case (a.Type() == NodeTypeFan && b.Type() == NodeTypeNative) || (a.Type() == NodeTypeNative && b.Type() == NodeTypeFan):
-		// Fan-Native interaction: Application of native function
+	case (a.Type() == NodeTypeFan && b.Type() == NodeTypePure) || (a.Type() == NodeTypePure && b.Type() == NodeTypeFan):
+		// Fan-Pure interaction: Application of pure function
 		rule = RuleFanNative
 		if a.Type() == NodeTypeFan {
 			n.applyNative(a, b, depth)
