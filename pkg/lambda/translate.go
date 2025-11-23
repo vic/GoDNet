@@ -16,16 +16,19 @@ type varInfo struct {
 }
 
 // ToDeltaNet converts a lambda term to a Delta Net.
-func ToDeltaNet(term Term, net *deltanet.Network) (deltanet.Node, int) {
+// Returns: root node, root port, and a map from Var node IDs to variable names.
+func ToDeltaNet(term Term, net *deltanet.Network) (deltanet.Node, int, map[uint64]string) {
 	// We return the Node and Port index that represents the "root" of the term.
 	// This port should be connected to the "parent".
 
 	vars := make(map[string]*varInfo)
+	varNames := make(map[uint64]string)
 
-	return buildTerm(term, net, vars, 0, 0)
+	node, port := buildTerm(term, net, vars, 0, 0, varNames)
+	return node, port, varNames
 }
 
-func buildTerm(term Term, net *deltanet.Network, vars map[string]*varInfo, level int, depth uint64) (deltanet.Node, int) {
+func buildTerm(term Term, net *deltanet.Network, vars map[string]*varInfo, level int, depth uint64, varNames map[uint64]string) (deltanet.Node, int) {
 	switch t := term.(type) {
 	case Var:
 		if info, ok := vars[t.Name]; ok {
@@ -100,6 +103,8 @@ func buildTerm(term Term, net *deltanet.Network, vars map[string]*varInfo, level
 			// Free variable
 			// Create Var node
 			v := net.NewVar()
+			// Store the variable name for later reconstruction
+			varNames[v.ID()] = t.Name
 			// Create Replicator to share it (as per deltanets.ts)
 			// "Create free variable node... Create a replicator fan-in... link... return rep.1"
 			// Level 0 for free vars.
@@ -131,7 +136,7 @@ func buildTerm(term Term, net *deltanet.Network, vars map[string]*varInfo, level
 		vars[t.Arg] = &varInfo{node: fan, port: 2, level: level}
 
 		// Build Body
-		bodyNode, bodyPort := buildTerm(t.Body, net, vars, level, depth)
+		bodyNode, bodyPort := buildTerm(t.Body, net, vars, level, depth, varNames)
 		net.LinkAt(fan, 1, bodyNode, bodyPort, depth)
 
 		// Restore var
@@ -151,11 +156,11 @@ func buildTerm(term Term, net *deltanet.Network, vars map[string]*varInfo, level
 		// fan.2 is Argument
 
 		// Build Function
-		funNode, funPort := buildTerm(t.Fun, net, vars, level, depth)
+		funNode, funPort := buildTerm(t.Fun, net, vars, level, depth, varNames)
 		net.LinkAt(fan, 0, funNode, funPort, depth)
 
 		// Build Argument (level + 1)
-		argNode, argPort := buildTerm(t.Arg, net, vars, level+1, depth+1)
+		argNode, argPort := buildTerm(t.Arg, net, vars, level+1, depth+1, varNames)
 		net.LinkAt(fan, 2, argNode, argPort, depth+1)
 
 		return fan, 1
@@ -167,7 +172,7 @@ func buildTerm(term Term, net *deltanet.Network, vars map[string]*varInfo, level
 			Fun: Abs{Arg: t.Name, Body: t.Body},
 			Arg: t.Val,
 		}
-		return buildTerm(desugared, net, vars, level, depth)
+		return buildTerm(desugared, net, vars, level, depth, varNames)
 
 	default:
 		panic("Unknown term type")
@@ -175,7 +180,8 @@ func buildTerm(term Term, net *deltanet.Network, vars map[string]*varInfo, level
 }
 
 // FromDeltaNet reconstructs a lambda term from the network.
-func FromDeltaNet(net *deltanet.Network, rootNode deltanet.Node, rootPort int) Term {
+// varNames maps Var node IDs to their original variable names.
+func FromDeltaNet(net *deltanet.Network, rootNode deltanet.Node, rootPort int, varNames map[uint64]string) Term {
 	// Debug
 	// fmt.Printf("FromDeltaNet: Root %v Port %d\n", rootNode.Type(), rootPort)
 
@@ -197,10 +203,10 @@ func FromDeltaNet(net *deltanet.Network, rootNode deltanet.Node, rootPort int) T
 	}
 
 	visited := make(map[string]bool)
-	return readTerm(net, rootNode, rootPort, bindings, nextName, visited)
+	return readTerm(net, rootNode, rootPort, bindings, nextName, visited, varNames)
 }
 
-func readTerm(net *deltanet.Network, node deltanet.Node, port int, bindings map[uint64]string, nextName func() string, visited map[string]bool) Term {
+func readTerm(net *deltanet.Network, node deltanet.Node, port int, bindings map[uint64]string, nextName func() string, visited map[string]bool, varNames map[uint64]string) Term {
 	if node == nil {
 		return Var{Name: "<nil>"}
 	}
@@ -272,7 +278,7 @@ func readTerm(net *deltanet.Network, node deltanet.Node, port int, bindings map[
 				bodyPortIdx = 0
 			}
 
-			body := readTerm(net, getLinkNode(net, node, bodyPortIdx), getLinkPort(net, node, bodyPortIdx), bindings, nextName, visited)
+			body := readTerm(net, getLinkNode(net, node, bodyPortIdx), getLinkPort(net, node, bodyPortIdx), bindings, nextName, visited, varNames)
 			return Abs{Arg: name, Body: body}
 
 		} else if logicalPort == 1 {
@@ -299,8 +305,8 @@ func readTerm(net *deltanet.Network, node deltanet.Node, port int, bindings map[
 			if deltaDebug {
 				fmt.Printf("  App at Fan id=%d funLink=(%v id=%d port=%d) argLink=(%v id=%d port=%d)\n", node.ID(), funNode.Type(), funNode.ID(), funP, argNode.Type(), argNode.ID(), argP)
 			}
-			fun := readTerm(net, funNode, funP, bindings, nextName, visited)
-			arg := readTerm(net, argNode, argP, bindings, nextName, visited)
+			fun := readTerm(net, funNode, funP, bindings, nextName, visited, varNames)
+			arg := readTerm(net, argNode, argP, bindings, nextName, visited, varNames)
 			return App{Fun: fun, Arg: arg}
 
 		} else {
@@ -331,7 +337,7 @@ func readTerm(net *deltanet.Network, node deltanet.Node, port int, bindings map[
 			// Trace back until we hit a Fan.2 (Binder) or Var (Free)
 			// If the source is a Fan (Abs/App), traceVariable will delegate
 			// to readTerm to reconstruct the full subterm.
-			return traceVariable(net, sourceNode, sourcePort, bindings, nextName, visited)
+			return traceVariable(net, sourceNode, sourcePort, bindings, nextName, visited, varNames)
 		} else {
 			// Entered at 0?
 			// Reading the value being shared?
@@ -419,7 +425,7 @@ func readTerm(net *deltanet.Network, node deltanet.Node, port int, bindings map[
 	}
 }
 
-func traceVariable(net *deltanet.Network, node deltanet.Node, port int, bindings map[uint64]string, nextName func() string, visited map[string]bool) Term {
+func traceVariable(net *deltanet.Network, node deltanet.Node, port int, bindings map[uint64]string, nextName func() string, visited map[string]bool, varNames map[uint64]string) Term {
 	// Follow wires up through Replicators (entering at 0, leaving at 0?)
 	// No, `Rep.0` connects to Source.
 	// So if we are at `Rep`, we go to `Rep.0`'s link.
@@ -461,7 +467,7 @@ func traceVariable(net *deltanet.Network, node deltanet.Node, port int, bindings
 			}
 			// If Logical 0 or 1, reconstruct the full term (Abs or App)
 			// readTerm handles rotation internally based on port passed.
-			return readTerm(net, currNode, currPort, bindings, nextName, visited)
+			return readTerm(net, currNode, currPort, bindings, nextName, visited, varNames)
 
 		case deltanet.NodeTypeReplicator:
 			// Continue trace from Rep.0
@@ -476,6 +482,15 @@ func traceVariable(net *deltanet.Network, node deltanet.Node, port int, bindings
 			currPort = nextPort
 
 		case deltanet.NodeTypeVar:
+			if deltaDebug {
+				fmt.Printf("  traceVariable: hit Var id=%d, varNames has %d entries\n", currNode.ID(), len(varNames))
+				for id, name := range varNames {
+					fmt.Printf("    varNames[%d] = %s\n", id, name)
+				}
+			}
+			if name, ok := varNames[currNode.ID()]; ok {
+				return Var{Name: name}
+			}
 			return Var{Name: "<free>"}
 
 		case deltanet.NodeTypeEraser:

@@ -190,6 +190,33 @@ func (n *Network) NodeCount() int {
 	return len(n.nodes)
 }
 
+// ActiveNodeCount returns the count of nodes that are not marked as dead
+func (n *Network) ActiveNodeCount() int {
+	n.nodesMu.Lock()
+	defer n.nodesMu.Unlock()
+	count := 0
+	for _, node := range n.nodes {
+		if !node.IsDead() {
+			count++
+		}
+	}
+	return count
+}
+
+// CollectGarbage removes dead nodes from the nodes map to prevent memory growth
+func (n *Network) CollectGarbage() int {
+	n.nodesMu.Lock()
+	defer n.nodesMu.Unlock()
+	collected := 0
+	for id, node := range n.nodes {
+		if node.IsDead() {
+			delete(n.nodes, id)
+			collected++
+		}
+	}
+	return collected
+}
+
 func (n *Network) nextNodeID() uint64 {
 	return atomic.AddUint64(&n.nextID, 1)
 }
@@ -392,6 +419,41 @@ func (n *Network) ReduceAll() {
 	n.Start()
 	// Wait for all active pairs to be processed
 	n.wg.Wait()
+}
+
+// ReduceWithLimit reduces the network for at most maxReductions steps.
+// Returns the number of reductions performed.
+// Periodically collects garbage (dead nodes) to maintain constant memory for cyclic terms.
+func (n *Network) ReduceWithLimit(maxReductions uint64) uint64 {
+	if maxReductions == 0 {
+		return 0
+	}
+	
+	startCount := n.GetStats().TotalReductions
+	n.Start()
+	
+	const gcInterval = 10 // Collect garbage every N reductions
+	
+	// Process at most maxReductions
+	for i := uint64(0); i < maxReductions; i++ {
+		wire := n.scheduler.Pop()
+		if wire == nil {
+			break // No more active pairs
+		}
+		
+		n.reductionMu.Lock()
+		n.reducePair(wire)
+		n.reductionMu.Unlock()
+		n.wg.Done()
+		
+		// Periodically collect dead nodes to maintain constant memory
+		if (i+1)%gcInterval == 0 {
+			n.CollectGarbage()
+		}
+	}
+	
+	endCount := n.GetStats().TotalReductions
+	return endCount - startCount
 }
 
 func (n *Network) worker() {
@@ -871,6 +933,70 @@ func (n *Network) ApplyCanonicalRules() bool {
 	endDecay := atomic.LoadUint64(&n.statRepDecay)
 	endMerge := atomic.LoadUint64(&n.statRepMerge)
 	return endDecay > startDecay || endMerge > startMerge
+}
+
+// ApplyErasureCanonization applies the erasure canonicalization step described
+// in the paper: "all parent-child wires starting from the root are traversed
+// and nodes are marked. All non-marked nodes are then erased."
+// This removes disconnected subnets that result from K combinator applications.
+func (n *Network) ApplyErasureCanonization() {
+	// Find the root node (typically a Var node that's not connected as parent)
+	// For now, mark all nodes and traverse from accessible ones
+	n.nodesMu.Lock()
+	allNodes := make(map[uint64]Node)
+	for id, node := range n.nodes {
+		allNodes[id] = node
+	}
+	n.nodesMu.Unlock()
+
+	// Mark nodes reachable from any Var that could be a root
+	marked := make(map[uint64]bool)
+	var traverse func(Node, int)
+	traverse = func(node Node, port int) {
+		if node == nil || node.IsDead() {
+			return
+		}
+		nodeID := node.ID()
+		if marked[nodeID] {
+			return
+		}
+		marked[nodeID] = true
+
+		// Traverse all connected nodes
+		for i := 0; i < len(node.Ports()); i++ {
+			target, targetPort := n.GetLink(node, i)
+			if target != nil && !target.IsDead() {
+				traverse(target, targetPort)
+			}
+		}
+	}
+
+	// Start traversal from all Var nodes (potential roots/interfaces)
+	for _, node := range allNodes {
+		if node.Type() == NodeTypeVar && !node.IsDead() {
+			traverse(node, 0)
+		}
+	}
+
+	// Erase all unmarked nodes by replacing with erasers
+	for id, node := range allNodes {
+		if !marked[id] && !node.IsDead() {
+			// Replace connections with erasers
+			for i := 0; i < len(node.Ports()); i++ {
+				target, targetPort := n.GetLink(node, i)
+				if target != nil && !target.IsDead() {
+					eraser := n.NewEraser()
+					n.Link(target, targetPort, eraser, 0)
+				}
+			}
+			// Mark node as dead by clearing its wires
+			for i := 0; i < len(node.Ports()); i++ {
+				node.Ports()[i].Wire.Store(nil)
+			}
+		}
+	}
+
+	n.wg.Wait()
 }
 
 func (n *Network) reduceRepMerge(rep Node) {

@@ -82,7 +82,7 @@ func Test_103_confluence(t *testing.T) {
 			net := deltanet.NewNetwork()
 			net.SetWorkers(workers)
 
-			root, port := lambda.ToDeltaNet(term, net)
+			root, port, varNames := lambda.ToDeltaNet(term, net)
 			outputNode := net.NewVar()
 			net.Link(root, port, outputNode, 0)
 
@@ -98,7 +98,7 @@ func Test_103_confluence(t *testing.T) {
 				resNode, resPort = net.GetLink(outputNode, 0)
 			}
 
-			actualTerm := lambda.FromDeltaNet(net, resNode, resPort)
+			actualTerm := lambda.FromDeltaNet(net, resNode, resPort, varNames)
 
 			// Strip unused abstractions if expected is a free variable
 			if _, ok := expectedTerm.(lambda.Var); ok {
@@ -177,7 +177,7 @@ func Test_103_confluence_PerfectConfluence(t *testing.T) {
 		net := deltanet.NewNetwork()
 		net.SetWorkers(workers)
 
-		root, port := lambda.ToDeltaNet(term, net)
+		root, port, _ := lambda.ToDeltaNet(term, net)
 		outputNode := net.NewVar()
 		net.Link(root, port, outputNode, 0)
 

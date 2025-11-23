@@ -68,7 +68,7 @@ func CheckLambdaReduction(t *testing.T, testName string, inputStr string, output
 	// Convert input to Net
 	net := deltanet.NewNetwork()
 	// net.EnableTrace(1000) // Debug
-	root, port := lambda.ToDeltaNet(term, net)
+	root, port, varNames := lambda.ToDeltaNet(term, net)
 
 	// Connect to output interface
 	output := net.NewVar()
@@ -95,7 +95,7 @@ func CheckLambdaReduction(t *testing.T, testName string, inputStr string, output
 	// Read back into a Term
 	resNode, resPort = net.GetLink(output, 0)
 	t.Logf("%s: root node before FromDeltaNet: %v id=%d port=%d", testName, resNode.Type(), resNode.ID(), resPort)
-	actualTerm := lambda.FromDeltaNet(net, resNode, resPort)
+	actualTerm := lambda.FromDeltaNet(net, resNode, resPort, varNames)
 
 	// If expected is a simple free variable, collapse any top-level
 	// unused abstractions that canonicalization may have missed. This

@@ -36,7 +36,7 @@ func main() {
 	}
 
 	net := deltanet.NewNetwork()
-	root, port := lambda.ToDeltaNet(term, net)
+	root, port, varNames := lambda.ToDeltaNet(term, net)
 
 	// Connect root to a dummy interface node to allow reduction at the root
 	output := net.NewVar()
@@ -48,7 +48,7 @@ func main() {
 
 	// Read back from the output node
 	resNode, resPort := net.GetLink(output, 0)
-	res := lambda.FromDeltaNet(net, resNode, resPort)
+	res := lambda.FromDeltaNet(net, resNode, resPort, varNames)
 	fmt.Println(res)
 
 	stats := net.GetStats()

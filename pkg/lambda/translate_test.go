@@ -9,11 +9,11 @@ import (
 // helper: roundtrip a term through ToDeltaNet -> FromDeltaNet (no reduction)
 func roundtrip(t *testing.T, term Term) Term {
 	net := deltanet.NewNetwork()
-	rootNode, rootPort := ToDeltaNet(term, net)
+	rootNode, rootPort, varNames := ToDeltaNet(term, net)
 	// ensure deterministic tiny timeout for network workers
 	// Ensure any pending interactions are processed (no-op if none)
 	net.ReduceAll()
-	res := FromDeltaNet(net, rootNode, rootPort)
+	res := FromDeltaNet(net, rootNode, rootPort, varNames)
 	return res
 }
 

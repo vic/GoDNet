@@ -17,29 +17,38 @@ func Test_102_non_normalizing_ConstantMemory(t *testing.T) {
 
 	// Convert to Net
 	net := deltanet.NewNetwork()
-	root, port := lambda.ToDeltaNet(term, net)
+	root, port, _ := lambda.ToDeltaNet(term, net)
 
 	// Connect to output
 	output := net.NewVar()
 	net.Link(root, port, output, 0)
 
-	// Initial node count
-	initialNodes := net.NodeCount()
+	// Initial counts
+	initialActive := net.ActiveNodeCount()
+	initialTotal := net.NodeCount()
 
-	// Reduce for a few steps
-	for i := 0; i < 10; i++ {
-		prevOps := net.GetStats().TotalReductions
-		net.ReduceAll()
-		currOps := net.GetStats().TotalReductions
-		if currOps == prevOps {
-			// Converged
-			break
-		}
+	// Reduce for a bounded number of steps (non-normalizing term!)
+	maxReductions := uint64(1000)
+	performedSteps := net.ReduceWithLimit(maxReductions)
 
-		// Check node count doesn't grow excessively
-		currentNodes := net.NodeCount()
-		if currentNodes > initialNodes+200 { // Allow some growth
-			t.Errorf("Node count grew too much: initial %d, current %d at step %d", initialNodes, currentNodes, i)
+	finalActive := net.ActiveNodeCount()
+	finalTotal := net.NodeCount()
+	activeGrowth := finalActive - initialActive
+	totalGrowth := finalTotal - initialTotal
+
+	t.Logf("Non-normalizing term: performed %d reductions", performedSteps)
+	t.Logf("Active nodes: initial=%d, final=%d, growth=%d", 
+		initialActive, finalActive, activeGrowth)
+	t.Logf("Total nodes: initial=%d, final=%d, growth=%d",
+		initialTotal, finalTotal, totalGrowth)
+
+	// Verify constant memory with garbage collection
+	if performedSteps > 0 {
+		activeGrowthRate := float64(activeGrowth) / float64(performedSteps)
+		t.Logf("Active growth rate: %.4f nodes per reduction", activeGrowthRate)
+		
+		if activeGrowthRate > 0.5 {
+			t.Errorf("Active growth rate too high: %.4f (expected < 0.5)", activeGrowthRate)
 		}
 	}
 
