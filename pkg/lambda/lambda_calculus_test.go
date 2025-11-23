@@ -269,7 +269,7 @@ func TestBooleans(t *testing.T) {
 
 			n.ReduceToNormalForm()
 
-	resultNode, resultPort := n.GetLink(output, 0)
+			resultNode, resultPort := n.GetLink(output, 0)
 			result := FromDeltaNet(n, resultNode, resultPort, varNames)
 			t.Logf("%s → %v", tt.name, result)
 
@@ -323,7 +323,7 @@ func TestPairs(t *testing.T) {
 
 			n.ReduceToNormalForm()
 
-	resultNode, resultPort := n.GetLink(output, 0)
+			resultNode, resultPort := n.GetLink(output, 0)
 			result := FromDeltaNet(n, resultNode, resultPort, varNames)
 			t.Logf("%s: %s → %v", tt.name, tt.desc, result)
 
@@ -370,7 +370,7 @@ func TestLetBinding(t *testing.T) {
 
 			n.ReduceToNormalForm()
 
-	resultNode, resultPort := n.GetLink(output, 0)
+			resultNode, resultPort := n.GetLink(output, 0)
 			result := FromDeltaNet(n, resultNode, resultPort, varNames)
 			t.Logf("%s: %s → %v", tt.name, tt.desc, result)
 		})
@@ -494,7 +494,7 @@ func TestFreeVariables(t *testing.T) {
 
 			n.ReduceToNormalForm()
 
-	resultNode, resultPort := n.GetLink(output, 0)
+			resultNode, resultPort := n.GetLink(output, 0)
 			result := FromDeltaNet(n, resultNode, resultPort, varNames)
 			t.Logf("%s: %s → %v", tt.name, tt.desc, result)
 
@@ -575,7 +575,7 @@ func TestNonNormalizingTerm(t *testing.T) {
 	totalGrowth := finalTotal - initialTotal
 
 	t.Logf("Non-normalizing term: performed %d reductions", performedSteps)
-	t.Logf("Active nodes: initial=%d, final=%d, growth=%d", 
+	t.Logf("Active nodes: initial=%d, final=%d, growth=%d",
 		initialActive, finalActive, activeGrowth)
 	t.Logf("Total nodes (including dead): initial=%d, final=%d, growth=%d",
 		initialTotal, finalTotal, totalGrowth)
@@ -583,24 +583,24 @@ func TestNonNormalizingTerm(t *testing.T) {
 	// Paper: "leads to constant memory usage"
 	// With garbage collection of dead nodes, active memory should remain bounded.
 	// Dead nodes are periodically removed from the registry during ReduceWithLimit.
-	
+
 	if performedSteps > 0 {
 		activeGrowthRate := float64(activeGrowth) / float64(performedSteps)
 		t.Logf("Active growth rate: %.4f nodes per reduction", activeGrowthRate)
-		
+
 		// Verify active memory stays bounded (near-constant)
 		// With GC, active nodes should not grow linearly
 		if activeGrowthRate > 0.5 {
-			t.Errorf("Active growth rate too high: %.4f nodes/reduction (expected < 0.5)", 
+			t.Errorf("Active growth rate too high: %.4f nodes/reduction (expected < 0.5)",
 				activeGrowthRate)
 		}
-		
+
 		// Total nodes may grow temporarily but should be cleaned by GC
 		totalGrowthRate := float64(totalGrowth) / float64(performedSteps)
 		t.Logf("Total growth rate: %.4f nodes per reduction", totalGrowthRate)
-		
+
 		if totalGrowthRate > 1.0 {
-			t.Errorf("Total growth rate too high: %.4f (expected < 1.0 with GC)", 
+			t.Errorf("Total growth rate too high: %.4f (expected < 1.0 with GC)",
 				totalGrowthRate)
 		}
 	}

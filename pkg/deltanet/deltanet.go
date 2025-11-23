@@ -428,30 +428,30 @@ func (n *Network) ReduceWithLimit(maxReductions uint64) uint64 {
 	if maxReductions == 0 {
 		return 0
 	}
-	
+
 	startCount := n.GetStats().TotalReductions
 	n.Start()
-	
+
 	const gcInterval = 10 // Collect garbage every N reductions
-	
+
 	// Process at most maxReductions
 	for i := uint64(0); i < maxReductions; i++ {
 		wire := n.scheduler.Pop()
 		if wire == nil {
 			break // No more active pairs
 		}
-		
+
 		n.reductionMu.Lock()
 		n.reducePair(wire)
 		n.reductionMu.Unlock()
 		n.wg.Done()
-		
+
 		// Periodically collect dead nodes to maintain constant memory
 		if (i+1)%gcInterval == 0 {
 			n.CollectGarbage()
 		}
 	}
-	
+
 	endCount := n.GetStats().TotalReductions
 	return endCount - startCount
 }

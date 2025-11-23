@@ -81,7 +81,7 @@ func TestErasureCanonMarkedNodes(t *testing.T) {
 	v2 := n.NewVar()
 
 	t.Logf("Node IDs: root=%v, fan=%v, v1=%v, v2=%v", root.ID(), fan.ID(), v1.ID(), v2.ID())
-	
+
 	n.Link(root, 0, fan, 0)
 	n.Link(fan, 1, v1, 0)
 	n.Link(fan, 2, v2, 0)
@@ -90,7 +90,7 @@ func TestErasureCanonMarkedNodes(t *testing.T) {
 	if !n.IsConnected(root, 0, fan, 0) {
 		t.Fatal("Link failed: root <-> fan not connected")
 	}
-	
+
 	// Check initial wire
 	initialWire := root.Ports()[0].Wire.Load()
 	if initialWire != nil {
@@ -117,12 +117,12 @@ func TestErasureCanonMarkedNodes(t *testing.T) {
 	// Check if nodes are marked as dead
 	t.Logf("After reduction: root.IsDead()=%v, fan.IsDead()=%v, v1.IsDead()=%v, v2.IsDead()=%v",
 		root.IsDead(), fan.IsDead(), v1.IsDead(), v2.IsDead())
-	
+
 	// Check wire status
 	rootWire := root.Ports()[0].Wire.Load()
 	fanWire0 := fan.Ports()[0].Wire.Load()
 	t.Logf("Wires: root:0=%v, fan:0=%v", rootWire != nil, fanWire0 != nil)
-	
+
 	if rootWire != nil && fanWire0 != nil {
 		t.Logf("Are they the same wire? %v", rootWire == fanWire0)
 		p0 := rootWire.P0.Load()
