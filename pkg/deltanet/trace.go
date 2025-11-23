@@ -14,6 +14,7 @@ const (
 	RuleRepDecay
 	RuleRepMerge
 	RuleAuxFanRep
+	RuleFanNative
 )
 
 type TraceEvent struct {

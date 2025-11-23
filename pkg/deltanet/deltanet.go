@@ -16,6 +16,8 @@ const (
 	NodeTypeEraser
 	NodeTypeReplicator
 	NodeTypeVar // Wire/Interface
+	NodeTypeData
+	NodeTypeNative
 )
 
 func (t NodeType) String() string {
@@ -28,6 +30,10 @@ func (t NodeType) String() string {
 		return "Replicator"
 	case NodeTypeVar:
 		return "Var"
+	case NodeTypeData:
+		return "Data"
+	case NodeTypeNative:
+		return "Native"
 	default:
 		return "Unknown"
 	}
@@ -44,6 +50,10 @@ type Node interface {
 	SetDead() bool
 	IsDead() bool
 	Revive()
+	// For Data nodes
+	GetValue() interface{}
+	// For Native nodes
+	GetName() string
 }
 
 // Port represents a connection point on a node.
@@ -69,11 +79,13 @@ type BaseNode struct {
 	dead  int32
 }
 
-func (n *BaseNode) Type() NodeType { return n.typ }
-func (n *BaseNode) ID() uint64     { return n.id }
-func (n *BaseNode) Ports() []*Port { return n.ports }
-func (n *BaseNode) Level() int     { return 0 }
-func (n *BaseNode) Deltas() []int  { return nil }
+func (n *BaseNode) Type() NodeType        { return n.typ }
+func (n *BaseNode) ID() uint64            { return n.id }
+func (n *BaseNode) Ports() []*Port        { return n.ports }
+func (n *BaseNode) Level() int            { return 0 }
+func (n *BaseNode) Deltas() []int         { return nil }
+func (n *BaseNode) GetValue() interface{} { return nil }
+func (n *BaseNode) GetName() string       { return "" }
 
 func (n *BaseNode) SetDead() bool {
 	return atomic.CompareAndSwapInt32(&n.dead, 0, 1)
@@ -96,6 +108,25 @@ type ReplicatorNode struct {
 
 func (n *ReplicatorNode) Level() int    { return n.level }
 func (n *ReplicatorNode) Deltas() []int { return n.deltas }
+
+// DataNode holds opaque data values.
+type DataNode struct {
+	BaseNode
+	value interface{}
+}
+
+func (n *DataNode) GetValue() interface{} { return n.value }
+
+// NativeNode represents a registered native function.
+type NativeNode struct {
+	BaseNode
+	name string
+}
+
+func (n *NativeNode) GetName() string { return n.name }
+
+// NativeFunc is a pure function that takes data and returns data or error.
+type NativeFunc func(interface{}) (interface{}, error)
 
 // Network manages the graph of nodes and interactions.
 type Network struct {
@@ -121,6 +152,10 @@ type Network struct {
 	// Registry of created nodes (used for canonicalization)
 	nodes   map[uint64]Node
 	nodesMu sync.Mutex
+
+	// Native function registry
+	natives   map[string]NativeFunc
+	nativesMu sync.RWMutex
 
 	traceBuf []TraceEvent
 	traceCap uint64
@@ -148,6 +183,7 @@ func NewNetwork() *Network {
 		scheduler: NewScheduler(),
 		workers:   runtime.NumCPU(),
 		nodes:     make(map[uint64]Node),
+		natives:   make(map[string]NativeFunc),
 		phase:     1,
 	}
 	return n
@@ -275,6 +311,59 @@ func (n *Network) NewReplicator(level int, deltas []int) Node {
 func (n *Network) NewVar() Node {
 	node := n.addNodeInternal(NodeTypeVar, 1) // 0: Connection
 	return node
+}
+
+func (n *Network) NewData(value interface{}) Node {
+	id := n.nextNodeID()
+	node := &DataNode{
+		BaseNode: BaseNode{
+			id:    id,
+			typ:   NodeTypeData,
+			ports: make([]*Port, 1), // 0: Connection
+		},
+		value: value,
+	}
+	node.ports[0] = &Port{Node: node, Index: 0}
+	n.nodesMu.Lock()
+	if n.nodes == nil {
+		n.nodes = make(map[uint64]Node)
+	}
+	n.nodes[node.id] = node
+	n.nodesMu.Unlock()
+	return node
+}
+
+func (n *Network) NewNative(name string) Node {
+	id := n.nextNodeID()
+	node := &NativeNode{
+		BaseNode: BaseNode{
+			id:    id,
+			typ:   NodeTypeNative,
+			ports: make([]*Port, 1), // 0: Connection (for application)
+		},
+		name: name,
+	}
+	node.ports[0] = &Port{Node: node, Index: 0}
+	n.nodesMu.Lock()
+	if n.nodes == nil {
+		n.nodes = make(map[uint64]Node)
+	}
+	n.nodes[node.id] = node
+	n.nodesMu.Unlock()
+	return node
+}
+
+func (n *Network) RegisterNative(name string, fn NativeFunc) {
+	n.nativesMu.Lock()
+	defer n.nativesMu.Unlock()
+	n.natives[name] = fn
+}
+
+func (n *Network) GetNative(name string) (NativeFunc, bool) {
+	n.nativesMu.RLock()
+	defer n.nativesMu.RUnlock()
+	fn, ok := n.natives[name]
+	return fn, ok
 }
 
 // Canonicalize prunes all nodes not reachable from the given root (node, port).
@@ -556,6 +645,21 @@ func (n *Network) reducePair(w *Wire) {
 				n.commuteFanReplicator(b, a, depth)
 			}
 		}
+	case (a.Type() == NodeTypeFan && b.Type() == NodeTypeNative) || (a.Type() == NodeTypeNative && b.Type() == NodeTypeFan):
+		// Fan-Native interaction: Application of native function
+		rule = RuleFanNative
+		if a.Type() == NodeTypeFan {
+			n.applyNative(a, b, depth)
+		} else {
+			n.applyNative(b, a, depth)
+		}
+	case (a.Type() == NodeTypeFan && b.Type() == NodeTypeData) || (a.Type() == NodeTypeData && b.Type() == NodeTypeFan):
+		// Fan-Data: should not happen in normal reduction (Data comes after Native)
+		// But if it does, treat Data as inert (like Var)
+		rule = RuleUnknown
+		fmt.Printf("Warning: Fan-Data interaction (Fan %d <-> Data %d)\n", a.ID(), b.ID())
+		a.Revive()
+		b.Revive()
 	default:
 		fmt.Printf("Unknown interaction: %v <-> %v\n", a.Type(), b.Type())
 	}
@@ -838,6 +942,86 @@ func (n *Network) createReplicatorCopy(original Node) Node {
 
 func (n *Network) createReplicatorCopyWithLevel(original Node, newLevel int) Node {
 	return n.NewReplicator(newLevel, original.Deltas())
+}
+
+// applyNative executes a native function application: Fan-Native interaction
+// Fan represents application: Fan.0 = function, Fan.2 = argument, Fan.1 = result
+// Native is the function node
+func (n *Network) applyNative(fan, native Node, depth uint64) {
+	// Get the native function
+	nativeName := native.GetName()
+	fn, ok := n.GetNative(nativeName)
+	if !ok {
+		fmt.Printf("Error: Native function %q not registered\n", nativeName)
+		// Create error data node
+		errData := n.NewData(fmt.Errorf("native function %q not found", nativeName))
+		// Connect result to error
+		if fan.Ports()[1].Wire.Load() != nil {
+			n.splice(errData.Ports()[0], fan.Ports()[1])
+		}
+		n.removeNode(fan)
+		n.removeNode(native)
+		return
+	}
+
+	// Get the argument from Fan.2
+	argNode, _ := n.GetLink(fan, 2)
+
+	// Check if argument is Data
+	if argNode == nil {
+		fmt.Printf("Error: Native %q applied to nil argument\n", nativeName)
+		errData := n.NewData(fmt.Errorf("nil argument"))
+		if fan.Ports()[1].Wire.Load() != nil {
+			n.splice(errData.Ports()[0], fan.Ports()[1])
+		}
+		n.removeNode(fan)
+		n.removeNode(native)
+		return
+	}
+
+	if argNode.Type() == NodeTypeData {
+		// Execute native function with data
+		value := argNode.GetValue()
+		result, err := fn(value)
+
+		var resultNode Node
+		if err != nil {
+			// Return error as data
+			resultNode = n.NewData(err)
+		} else {
+			// Check if result is a function (for currying)
+			if resultFn, isFn := result.(func(interface{}) (interface{}, error)); isFn {
+				// Result is a partially applied function - create new Native node
+				// Register it with a unique name
+				partialName := fmt.Sprintf("%s$partial$%d", nativeName, n.nextNodeID())
+				n.RegisterNative(partialName, resultFn)
+				resultNode = n.NewNative(partialName)
+			} else {
+				// Result is data
+				resultNode = n.NewData(result)
+			}
+		}
+
+		// Connect result to Fan.1
+		if fan.Ports()[1].Wire.Load() != nil {
+			n.splice(resultNode.Ports()[0], fan.Ports()[1])
+		}
+
+		// Remove processed nodes
+		n.removeNode(fan)
+		n.removeNode(native)
+		n.removeNode(argNode)
+	} else {
+		// Argument is not Data yet - the argument needs to reduce first
+		// This shouldn't happen in normal execution since we reduce arguments before functions
+		// But if it does, we treat this as an error case
+		fmt.Printf("Warning: Native %q applied to non-Data argument (type %v)\n", nativeName, argNode.Type())
+
+		// For now, just leave the structure as-is
+		// The reduction will continue with other active wires
+		fan.Revive()
+		native.Revive()
+	}
 }
 
 func (n *Network) SetPhase(p int) {
